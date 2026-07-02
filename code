@@ -1,0 +1,250 @@
+/***************************************************************
+  ESP8266 Telegram alert demo
+  - NodeMCU / Wemos D1 mini style pin names (D0..D8)
+  - Uses WiFiClientSecure + HTTPS GET to Telegram Bot API
+  - OLED display (SSD1306 I2C) shows messages locally
+  - Relay/buzzer control code example and triggerAlert() wrapper
+  - Replace WIFI_SSID, WIFI_PASS, BOT_TOKEN, CHAT_ID
+***************************************************************/
+
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ====== CONFIG ======
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASS =  "YOUR_WIFI_PASSWORD";
+
+// Create a bot on Telegram via @BotFather and paste your token & chat id here:
+const char* BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
+const char* CHAT_ID   = "YOUR_CHAT_ID";
+ // numeric chat id (string)
+
+// OLED settings (change address if yours is different)
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ====== PIN MAP (adjust if you have different wiring) ======
+// I2C: SDA -> D2 (GPIO4), SCL -> D1 (GPIO5)
+const uint8_t PIN_RELAY1 = D6; // Relay IN1 (Bulb1 control)
+const uint8_t PIN_RELAY2 = D7; // Relay IN2 (Bulb2 control)
+const uint8_t PIN_BUZZER  = D5; // Active buzzer + -> D5, - -> GND
+
+// Alert suppression (ms)
+const unsigned long ALERT_SUPPRESS_MS = 3UL * 60UL * 1000UL; // 3 minutes
+unsigned long lastAlertTime = 0;
+
+// Debounce simple
+const unsigned long DEBOUNCE_MS = 500;
+unsigned long lastChangeTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+
+  // pins
+  pinMode(PIN_RELAY1, OUTPUT);
+  pinMode(PIN_RELAY2, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+
+  // default states
+  digitalWrite(PIN_RELAY1, LOW); // relays off by default (module active state can differ)
+  digitalWrite(PIN_RELAY2, LOW);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  // OLED init
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("SSD1306 allocation failed");
+    // Do not block forever in production - but for debug we stop
+    while (true) delay(10);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Booting...");
+  display.display();
+
+  // connect WiFi
+  connectWiFi();
+
+  // show ready
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("System Ready");
+  display.println("Telegram OK");
+  display.display();
+  delay(600);
+}
+
+// ----- Connect to WiFi -----
+void connectWiFi() {
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("WiFi: Connecting");
+  display.display();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    Serial.print(".");
+    delay(300);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("WiFi connected");
+    display.print("IP:");
+    display.println(WiFi.localIP());
+    display.display();
+  } else {
+    Serial.println("\nWiFi failed");
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("WiFi FAILED");
+    display.display();
+  }
+}
+
+// ----- URL-encode (simple) -----
+String urlEncode(const String &str) {
+  String encoded = "";
+  char c;
+  char buf[5];
+  for (size_t i = 0; i < str.length(); i++) {
+    c = str[i];
+    if ( (c >= 'a' && c <= 'z') ||
+         (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') ||
+         c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += c;
+    } else if (c == ' ') {
+      encoded += "%20";
+    } else {
+      sprintf(buf, "%%%02X", (unsigned char)c);
+      encoded += buf;
+    }
+  }
+  return encoded;
+}
+
+// ----- Send Telegram message via HTTPS GET (basic) -----
+bool sendTelegram(const String &message) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected");
+    return false;
+  }
+  const char* host = "api.telegram.org";
+  String url = String("/bot") + BOT_TOKEN + "/sendMessage";
+  String query = "?chat_id=" + String(CHAT_ID) + "&text=" + urlEncode(message);
+
+  WiFiClientSecure client;
+  client.setTimeout(7000);
+  client.setInsecure(); // prototype: disables certificate verification
+
+  Serial.printf("Connecting to %s...\n", host);
+  if (!client.connect(host, 443)) {
+    Serial.println("Connection to Telegram failed");
+    return false;
+  }
+
+  // GET request
+  String req = String("GET ") + url + query + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" +
+               "User-Agent: ESP8266\r\n" +
+               "Connection: close\r\n\r\n";
+  client.print(req);
+
+  unsigned long start = millis();
+  // print server response header (optional)
+  while (client.connected() && millis() - start < 7000) {
+    while (client.available()) {
+      String line = client.readStringUntil('\n');
+      Serial.println(line);
+    }
+  }
+  client.stop();
+  Serial.println("Telegram request complete");
+  return true;
+}
+
+// ----- Helper: Trigger an alert (buzzer + OLED + Telegram) -----
+void triggerAlert(const String &reason) {
+  unsigned long now = millis();
+  if (now - lastAlertTime < ALERT_SUPPRESS_MS) {
+    Serial.println("Alert suppressed (recent).");
+    return;
+  }
+  lastAlertTime = now;
+
+  Serial.print("ALARM: ");
+  Serial.println(reason);
+
+  // local: show on OLED
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("!!! ALERT !!!");
+  display.println(reason);
+  display.display();
+
+  // sound buzzer (3 secs)
+  digitalWrite(PIN_BUZZER, HIGH);
+  // Send telegram (non-blocking-ish)
+  String msg = String("ALERT: ") + reason;
+  bool ok = sendTelegram(msg);
+  if (!ok) {
+    Serial.println("Telegram send failed");
+  }
+  delay(3000);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  // restore OLED after alert
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("Monitor running");
+  display.display();
+}
+
+// ----- Example: call triggerAlert when something happens
+// For demo, we toggle relays and trigger alerts by serial commands.
+// In your real project, call triggerAlert() when you detect a line break.
+void loop() {
+  // Demo control via Serial:
+  // Send "1" - toggle relay1 ON then off and send alert
+  // Send "2" - toggle relay2 and send alert
+  // Send "a" - send a custom Telegram test message (without buzzer)
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "1") {
+      Serial.println("Simulate Line1 Fault");
+      // example action: turn off relay1 (simulate loss) then alert
+      digitalWrite(PIN_RELAY1, LOW); // ensure off
+      delay(100);
+      triggerAlert("LINE 1 BROKEN (sim)");
+    } else if (cmd == "2") {
+      Serial.println("Simulate Line2 Fault");
+      digitalWrite(PIN_RELAY2, LOW);
+      delay(100);
+      triggerAlert("LINE 2 BROKEN (sim)");
+    } else if (cmd == "test") {
+      Serial.println("Telegram test");
+      sendTelegram("Test message from ESP8266");
+    } else {
+      Serial.println("Unknown cmd");
+    }
+  }
+
+  // --- In actual deployment, replace Serial triggers above with:
+  //  - sensor reads (optocoupler/ACS712) to detect line break,
+  //  - if break detected call triggerAlert("LINE 1 BROKEN") etc.
+  // Small idle delay
+  delay(100);
+}
