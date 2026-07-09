@@ -12,8 +12,6 @@ The Transmission Line Monitoring System is an intelligent embedded solution that
 - 🌡️ Over Temperature
 - ⚡ Voltage Fluctuation
 - 🔥 Fire Detection
-- 🌧️ Rain Detection
-- 🌬️ Wind Monitoring
 - 📏 Transmission Line Sag Detection
 - 🚨 Tower Tilt Detection
 - 💥 Fault Detection
@@ -39,11 +37,7 @@ Whenever an abnormal condition is detected, the system immediately sends notific
 
 - ESP8266 NodeMCU
 - DHT11 Temperature Sensor
-- Rain Sensor
 - Flame Sensor
-- MPU6050 Gyroscope & Accelerometer
-- Voltage Sensor
-- Current Sensor
 - Buzzer
 - LEDs
 - Power Supply
@@ -55,7 +49,6 @@ Whenever an abnormal condition is detected, the system immediately sends notific
 - Arduino IDE
 - Embedded C++
 - Telegram Bot API
-- GitHub
 
 ---
 
